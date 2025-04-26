@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::analysis::{DetectedConnection, DetectedDefinition}; // Añadir DetectedDefinition
+use crate::analysis::{DetectedDefinition, ResolvedConnection}; // DetectedConnection eliminado
 
 // --- Funciones Movidas desde analysis.rs ---
 
@@ -76,9 +76,10 @@ pub fn generate_structure_section(root_path: &Path, files: &[PathBuf]) -> String
 }
 
 
-pub fn generate_connections_section(root_path: &Path, connections: &[DetectedConnection]) -> String {
+// ACTUALIZADO: generate_connections_section ahora usa ResolvedConnection
+pub fn generate_connections_section(root_path: &Path, connections: &[ResolvedConnection]) -> String {
     let mut section = String::new();
-    section.push_str("## Detected Connections (Tree)\n\n");
+    section.push_str("## Detected Connections (Resolved)\n\n");
 
     if connections.is_empty() {
         section.push_str("_No connections detected._\n");
@@ -86,12 +87,12 @@ pub fn generate_connections_section(root_path: &Path, connections: &[DetectedCon
     }
 
     // 1. Group connections by source file
-    let mut grouped_connections: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    let mut grouped_connections: HashMap<PathBuf, Vec<&ResolvedConnection>> = HashMap::new();
     for conn in connections {
         grouped_connections
             .entry(conn.source_file.clone())
             .or_default()
-            .push(conn.imported_string.clone());
+            .push(conn);
     }
 
     // 2. Get sorted source files
@@ -105,7 +106,6 @@ pub fn generate_connections_section(root_path: &Path, connections: &[DetectedCon
         let is_last_file = i == num_files - 1;
         let file_prefix = if is_last_file { "└── " } else { "├── " };
 
-        // Display relative path if possible
         let display_path = file_path
             .strip_prefix(root_path)
             .unwrap_or(file_path)
@@ -113,16 +113,32 @@ pub fn generate_connections_section(root_path: &Path, connections: &[DetectedCon
 
         section.push_str(&format!("{}{}\n", file_prefix, display_path));
 
-        // Get and sort imports for this file
+        // Get and sort imports for this file (by imported_string)
         if let Some(imports) = grouped_connections.get_mut(file_path) {
-            imports.sort();
+            imports.sort_by(|a, b| a.imported_string.cmp(&b.imported_string));
             let num_imports = imports.len();
             let base_indent = if is_last_file { "    " } else { "│   " };
 
-            for (j, import_str) in imports.iter().enumerate() {
+            for (j, import_conn) in imports.iter().enumerate() {
                 let is_last_import = j == num_imports - 1;
                 let import_prefix = if is_last_import { "└── " } else { "├── " };
-                section.push_str(&format!("{}{}{}\n", base_indent, import_prefix, import_str));
+                
+                let target_info = match &import_conn.resolved_target {
+                    Some(target_path) => {
+                         // Intentar mostrar ruta relativa al root_path si es posible
+                        let relative_target = target_path.strip_prefix(root_path).unwrap_or(target_path);
+                        format!(" -> {}", relative_target.display())
+                    }
+                    None => " (External or Unresolved)".to_string()
+                };
+
+                section.push_str(&format!(
+                    "{}{}{}{}\n", 
+                    base_indent, 
+                    import_prefix, 
+                    import_conn.imported_string,
+                    target_info
+                ));
             }
         }
     }
@@ -186,6 +202,76 @@ pub fn generate_definitions_section(root_path: &Path, definitions: &[DetectedDef
             section.push_str("```\n\n");
         }
     }
+
+    section
+}
+
+// --- NUEVA FUNCIÓN: Generar Sección de Usos Inversos ---
+pub fn generate_inverse_usage_section(root_path: &Path, connections: &[ResolvedConnection]) -> String {
+    let mut section = String::new();
+    section.push_str("## Inverse Usage (Who Imports What)\n\n");
+
+    // 1. Construir mapa inverso: Target -> Vec<Source>
+    let mut inverse_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    let mut files_with_imports: HashSet<PathBuf> = HashSet::new(); // Para rastrear archivos que *tienen* importaciones
+
+    for conn in connections {
+        if let Some(target_path) = &conn.resolved_target {
+            inverse_map
+                .entry(target_path.clone()) // El archivo importado es la clave
+                .or_default()
+                .push(conn.source_file.clone()); // El archivo que importa es el valor
+            files_with_imports.insert(target_path.clone()); // Marcar que este archivo fue importado
+        }
+    }
+
+    if inverse_map.is_empty() {
+        section.push_str("_No resolved local imports found to build inverse usage._\n");
+        return section;
+    }
+
+    // 2. Obtener lista ordenada de archivos que fueron importados
+    let mut sorted_target_files: Vec<PathBuf> = inverse_map.keys().cloned().collect();
+    sorted_target_files.sort();
+
+    // 3. Construir la cadena de reporte
+    section.push_str("```\n");
+    let num_targets = sorted_target_files.len();
+    for (i, target_file) in sorted_target_files.iter().enumerate() {
+        let is_last_target = i == num_targets - 1;
+        let target_prefix = if is_last_target { "└── " } else { "├── " };
+
+        let display_target_path = target_file
+            .strip_prefix(root_path)
+            .unwrap_or(target_file)
+            .display();
+
+        section.push_str(&format!("{}{}\n", target_prefix, display_target_path));
+
+        if let Some(source_files) = inverse_map.get_mut(target_file) {
+            source_files.sort(); // Ordenar los archivos que lo importan
+            let num_sources = source_files.len();
+            let base_indent = if is_last_target { "    " } else { "│   " };
+
+            for (j, source_file) in source_files.iter().enumerate() {
+                let is_last_source = j == num_sources - 1;
+                let source_prefix = if is_last_source { "└── " } else { "├── " };
+                
+                let display_source_path = source_file
+                    .strip_prefix(root_path)
+                    .unwrap_or(source_file)
+                    .display();
+
+                section.push_str(&format!(
+                    "{}{}{}\n", 
+                    base_indent, 
+                    source_prefix, 
+                    display_source_path
+                ));
+            }
+        }
+    }
+    section.push_str("```\n");
 
     section
 }

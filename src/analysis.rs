@@ -6,6 +6,7 @@ use walkdir::{DirEntry, WalkDir};
 use std::collections::{HashSet};
 use rayon::prelude::*;
 use tree_sitter::{Parser, Language, Query, QueryCursor, Node};
+use path_clean::PathClean;
 
 
 
@@ -22,6 +23,13 @@ pub struct DetectedConnection {
 }
 
 #[derive(Clone, Debug)]
+pub struct ResolvedConnection {
+    pub source_file: PathBuf,
+    pub imported_string: String,
+    pub resolved_target: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
 pub struct DetectedDefinition {
     pub source_file: PathBuf,
     pub symbol_name: String,
@@ -30,7 +38,7 @@ pub struct DetectedDefinition {
 }
 
 
-pub type AnalysisResult = Result<(PathBuf, Vec<PathBuf>, Vec<DetectedConnection>, Vec<DetectedDefinition>), String>;
+pub type AnalysisResult = Result<(PathBuf, Vec<PathBuf>, Vec<ResolvedConnection>, Vec<DetectedDefinition>), String>;
 
 // --- Tree-sitter Languages (Extern declarations) ---
 unsafe extern "C" { fn tree_sitter_javascript() -> Language; }
@@ -146,29 +154,59 @@ fn analyze_file_content(path: &Path) -> (Vec<DetectedConnection>, Vec<DetectedDe
          }
     }
 
-    // --- NUEVA Consulta para Definiciones y Exportaciones ---
-    let definition_query_str = r#"
-        [
-          ; Funciones
-          (function_declaration name: (identifier) @def.name) @def.function
-          (lexical_declaration
-            (variable_declarator name: (identifier) @def.name value: [
-              (arrow_function)
-              (function_expression)
-            ])
-          ) @def.function.lexical
-          (export_statement declaration: (function_declaration name: (identifier) @def.name)) @def.function.exported.decl
-
-          ; Clases
-          (class_declaration name: (type_identifier) @def.name) @def.class
-          (export_statement declaration: (class_declaration name: (type_identifier) @def.name)) @def.class.exported.decl
-
-          ; Variables/Constantes (exportadas o de nivel superior)
-          (export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @def.name))) @def.var.exported.decl
-          (export_statement (variable_declaration (variable_declarator name: (identifier) @def.name))) @def.var.exported.decl.var
-          ; (program (lexical_declaration (variable_declarator name: (identifier) @def.name))) @def.var.toplevel ; Podría ser muy ruidoso, comentar por ahora
-        ]
-    "#;
+    // --- Consulta de Definiciones (Adaptada por lenguaje) ---
+    let definition_query_str = match path.extension().and_then(|ext| ext.to_str()) {
+        // JavaScript (js, jsx, mjs, cjs) usa 'identifier' para clases
+        Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => r#"
+            [
+              ; Funciones
+              (function_declaration name: (identifier) @def.name) @def.function
+              (lexical_declaration
+                (variable_declarator name: (identifier) @def.name value: [
+                  (arrow_function)
+                  (function_expression)
+                ])
+              ) @def.function.lexical
+              (export_statement declaration: (function_declaration name: (identifier) @def.name)) @def.function.exported.decl
+    
+              ; Clases (JS usa identifier)
+              (class_declaration name: (identifier) @def.name) @def.class 
+              (export_statement declaration: (class_declaration name: (identifier) @def.name)) @def.class.exported.decl
+    
+              ; Variables/Constantes
+              (export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @def.name))) @def.var.exported.decl
+              (export_statement (variable_declaration (variable_declarator name: (identifier) @def.name))) @def.var.exported.decl.var
+            ]
+        "#,
+        // TypeScript (ts, tsx) usa 'type_identifier' para clases
+        Some("ts") | Some("tsx") => r#"
+            [
+              ; Funciones
+              (function_declaration name: (identifier) @def.name) @def.function
+              (lexical_declaration
+                (variable_declarator name: (identifier) @def.name value: [
+                  (arrow_function)
+                  (function_expression)
+                ])
+              ) @def.function.lexical
+              (export_statement declaration: (function_declaration name: (identifier) @def.name)) @def.function.exported.decl
+    
+              ; Clases (TS/TSX usa type_identifier)
+              (class_declaration name: (type_identifier) @def.name) @def.class 
+              (export_statement declaration: (class_declaration name: (type_identifier) @def.name)) @def.class.exported.decl
+    
+              ; Variables/Constantes
+              (export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @def.name))) @def.var.exported.decl
+              (export_statement (variable_declaration (variable_declarator name: (identifier) @def.name))) @def.var.exported.decl.var
+            ]
+        "#,
+        // Fallback: Si no es un lenguaje soportado, no intentar consulta de definiciones
+        _ => {
+             // Ya hemos devuelto (connections, definitions) vacíos antes si el lenguaje no es soportado,
+            // pero por seguridad, retornamos de nuevo aquí si llegamos inesperadamente.
+            return (connections, definitions);
+        }
+    };
 
     let def_query = match Query::new(language_ref, definition_query_str) {
         Ok(q) => q,
@@ -240,6 +278,80 @@ fn analyze_file_content(path: &Path) -> (Vec<DetectedConnection>, Vec<DetectedDe
 }
 
 
+// NUEVA: Función auxiliar para resolver rutas de importación
+fn resolve_import_path(
+    source_file: &Path,
+    import_str: &str,
+    project_files: &HashSet<PathBuf> // Conjunto de todos los archivos válidos del proyecto
+) -> Option<PathBuf> {
+    // Ignorar paquetes (sin ./) y URLs/absolutos por ahora
+    if !import_str.starts_with('.') || import_str.contains(':') {
+        return None;
+    }
+
+    let source_dir = source_file.parent()?;
+
+    // Construir ruta base y limpiarla/normalizarla
+    let base_path = source_dir.join(import_str);
+    let cleaned_base_path = base_path.clean(); // Usa path_clean
+
+    // Extensiones a probar
+    let extensions = ["", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"];
+    // Archivos índice a probar si es un directorio
+    let index_files = ["index.js", "index.jsx", "index.ts", "index.tsx", "index.mjs", "index.cjs"];
+
+    // 1. Probar como archivo con/sin extensión
+    for ext in extensions {
+        let mut potential_path = cleaned_base_path.clone();
+        // set_extension requiere la extensión sin el punto inicial, pero sí para la comparación
+        // Manejar el caso sin extensión explícitamente
+        if ext.is_empty() {
+             // Ya es cleaned_base_path, no hacer nada
+        } else {
+            // Construir el nombre de archivo con extensión
+             let current_filename = potential_path.file_name().unwrap_or_default();
+             let mut new_filename = current_filename.to_os_string();
+            // Evitar doble extensión si ya la tiene
+            if potential_path.extension().is_none() || potential_path.extension().unwrap_or_default() != ext.trim_start_matches('.') {
+                 new_filename.push(ext);
+                 potential_path.set_file_name(new_filename);
+            }
+        }
+
+        // Normalizar DE NUEVO después de añadir/modificar extensión
+        let final_path = potential_path.clean();
+
+        if project_files.contains(&final_path) {
+            return Some(final_path);
+        }
+
+        // Caso especial: si el import no tiene extensión, probar añadiéndola
+        if import_str.ends_with('/') || Path::new(import_str).extension().is_none() {
+            if !ext.is_empty() {
+                 let mut path_with_ext = cleaned_base_path.clone();
+                path_with_ext.set_extension(ext.trim_start_matches('.'));
+                let final_path_with_ext = path_with_ext.clean();
+                 if project_files.contains(&final_path_with_ext) {
+                    return Some(final_path_with_ext);
+                }
+            }
+        }
+
+    }
+
+    // 2. Probar como directorio buscando archivo index
+    // (No necesitamos verificar is_dir explícitamente, path_clean maneja la base)
+    for index_file in index_files {
+        let potential_path = cleaned_base_path.join(index_file).clean();
+        if project_files.contains(&potential_path) {
+            return Some(potential_path);
+        }
+    }
+
+    None // No se encontró resolución local
+}
+
+
 // --- Funciones Públicas Principales ---
 
 
@@ -248,14 +360,21 @@ pub fn start_analysis(path_to_scan: PathBuf) -> Receiver<AnalysisResult> {
 
     thread::spawn(move || {
         let root_path = path_to_scan;
-        let walker: Vec<_> = WalkDir::new(&root_path)
+        let walker_entries: Vec<_> = WalkDir::new(&root_path)
             .into_iter()
             .filter_entry(|e| !is_ignored(e))
             .filter_map(|e| e.ok())
             .filter(|entry| entry.path().is_file() && !is_ignored(entry))
             .collect();
 
-        let results: Vec<(PathBuf, Vec<DetectedConnection>, Vec<DetectedDefinition>)> = walker
+        // Crear HashSet de todos los archivos encontrados para búsqueda eficiente
+        let project_files_set: HashSet<PathBuf> = walker_entries
+            .par_iter()
+            .map(|entry| entry.path().to_path_buf().clean()) // Limpiar/normalizar aquí también
+            .collect();
+
+        // Paso 1: Análisis inicial para obtener conexiones crudas y definiciones
+        let initial_results: Vec<(PathBuf, Vec<DetectedConnection>, Vec<DetectedDefinition>)> = walker_entries
             .par_iter()
             .map(|entry| {
                 let path = entry.path().to_path_buf();
@@ -264,39 +383,37 @@ pub fn start_analysis(path_to_scan: PathBuf) -> Receiver<AnalysisResult> {
             })
             .collect();
 
-        let mut files = Vec::with_capacity(results.len());
-        let mut connections = Vec::new();
+        let mut files = Vec::with_capacity(initial_results.len());
+        let mut raw_connections = Vec::new();
         let mut definitions = Vec::new();
-        for (path, file_connections, file_definitions) in results {
-            files.push(path);
-            connections.extend(file_connections);
+        for (path, file_connections, file_definitions) in initial_results {
+            files.push(path.clean()); // Almacenar rutas limpias
+            raw_connections.extend(file_connections);
             definitions.extend(file_definitions);
         }
 
-        let result = Ok((root_path, files, connections, definitions));
-        tx.send(result).ok();
+        // Paso 2: Resolver las conexiones
+        let resolved_connections: Vec<ResolvedConnection> = raw_connections
+            .par_iter() // Paralelizar resolución si es posible/seguro
+            .map(|conn| {
+                let resolved = resolve_import_path(&conn.source_file, &conn.imported_string, &project_files_set);
+                ResolvedConnection {
+                    source_file: conn.source_file.clone().clean(), // Guardar ruta limpia
+                    imported_string: conn.imported_string.clone(),
+                    resolved_target: resolved, // Puede ser None
+                }
+            })
+            .collect();
+
+        // Ordenar archivos para consistencia
+        files.sort();
+        // Podríamos ordenar definiciones y conexiones si es necesario
+
+        // Enviar el resultado con conexiones resueltas
+        let result = Ok((root_path, files, resolved_connections, definitions));
+        tx.send(result).ok(); // Ignorar error si el receptor ya no existe
     });
 
     rx
 }
 
-
-// pub fn generate_context_text(
-//     root_path: &Path,
-//     files: &[PathBuf],
-//     connections: &[DetectedConnection],
-//     include_content: bool,
-// ) -> String {
-//     let mut context = String::new();
-
-//     context.push_str(&generate_structure_section(root_path, files));
-//     context.push_str("\n"); 
-//     context.push_str(&generate_connections_section(root_path, connections));
-
-//     if include_content {
-//         context.push_str("\n"); 
-//         context.push_str(&generate_file_content_section(root_path, files));
-//     }
-
-//     context
-// } 

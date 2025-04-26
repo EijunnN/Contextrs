@@ -7,14 +7,14 @@ use std::path::{ PathBuf};
 use std::sync::mpsc::{ Receiver};
 use std::time::{Duration, Instant};
 
-use analysis::{AnalysisResult, DetectedConnection, DetectedDefinition};
+use analysis::{AnalysisResult, DetectedDefinition, ResolvedConnection};
 use arboard::Clipboard;
 
 #[derive(Clone, Debug)]
 enum ScanStatus {
     Idle,
     Scanning,
-    Completed(PathBuf, Vec<PathBuf>, Vec<DetectedConnection>, Vec<DetectedDefinition>),
+    Completed(PathBuf, Vec<PathBuf>, Vec<ResolvedConnection>, Vec<DetectedDefinition>),
     Error(String),
 }
 
@@ -48,6 +48,7 @@ struct MyApp {
     connections_section: Option<String>,
     file_content_section: Option<String>,
     definitions_section: Option<String>,
+    inverse_usage_section: Option<String>,
 }
 
 impl Default for MyApp {
@@ -61,6 +62,7 @@ impl Default for MyApp {
             connections_section: None,
             file_content_section: None,
             definitions_section: None,
+            inverse_usage_section: None,
         }
     }
 }
@@ -147,6 +149,11 @@ impl eframe::App for MyApp {
                         copy_to_clipboard(text, &mut self.copy_notification);
                     }
                 }
+                if ui.add_enabled(copy_enabled, egui::Button::new("Copiar Usos")).clicked() {
+                    if let Some(text) = &self.inverse_usage_section {
+                        copy_to_clipboard(text, &mut self.copy_notification);
+                    }
+                }
                 if ui.add_enabled(copy_enabled, egui::Button::new("Copiar Todo")).clicked() {
                      let full_context = self.rebuild_full_context();
                     copy_to_clipboard(&full_context, &mut self.copy_notification);
@@ -169,6 +176,7 @@ impl eframe::App for MyApp {
                  self.structure_section = Some(reporting::generate_structure_section(root_path, files));
                  self.connections_section = Some(reporting::generate_connections_section(root_path, connections));
                  self.definitions_section = Some(reporting::generate_definitions_section(root_path, definitions));
+                 self.inverse_usage_section = Some(reporting::generate_inverse_usage_section(root_path, connections));
                  if self.include_file_content {
                      self.file_content_section = Some(reporting::generate_file_content_section(root_path, files));
                  } else {
@@ -206,6 +214,10 @@ impl eframe::App for MyApp {
                              ui.separator();
                             Self::display_section(ui, "definitions_section", definitions);
                         }
+                        if let Some(inverse_usage) = &self.inverse_usage_section {
+                            ui.separator();
+                            Self::display_section(ui, "inverse_usage_section", inverse_usage);
+                        }
                         if self.include_file_content {
                             if let Some(content) = &self.file_content_section {
                                  ui.separator();
@@ -226,6 +238,7 @@ impl MyApp {
         self.connections_section = None;
         self.file_content_section = None;
         self.definitions_section = None;
+        self.inverse_usage_section = None;
     }
 
     fn rebuild_full_context(&self) -> String {
@@ -240,6 +253,10 @@ impl MyApp {
         }
         if let Some(d) = &self.definitions_section {
             full_context.push_str(d);
+            full_context.push_str("\n\n");
+        }
+        if let Some(iu) = &self.inverse_usage_section {
+            full_context.push_str(iu);
             full_context.push_str("\n\n");
         }
         if self.include_file_content {
