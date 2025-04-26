@@ -3,10 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use walkdir::{DirEntry, WalkDir};
-use regex::Regex;
-use lazy_static::lazy_static; 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashSet, HashMap};
 use rayon::prelude::*;
+use tree_sitter::{Parser, Language, Query, QueryCursor};
 
 
 
@@ -25,17 +24,13 @@ pub struct DetectedConnection {
 
 pub type AnalysisResult = Result<(PathBuf, Vec<PathBuf>, Vec<DetectedConnection>), String>;
 
-// --- Regex ---
-
-lazy_static! {
-    
-    static ref IMPORT_REGEX: Regex = Regex::new(
-        r#"(?m)^[ \t]*(?:use|import|require|include|from)\s+(?:[\w:{}\s*]+?from\s+)?(?:['"]([^'"]+)['"]|([\w:]+))"#
-    ).unwrap();
-}
+// --- Tree-sitter Languages (Extern declarations) ---
+unsafe extern "C" { fn tree_sitter_javascript() -> Language; }
+unsafe extern "C" { fn tree_sitter_typescript() -> Language; }
+unsafe extern "C" { fn tree_sitter_tsx() -> Language; }
 
 
-// --- Funciones Auxiliares (Internas) ---
+// --- Helper Functions (Internal) ---
 
 
 fn is_ignored(entry: &DirEntry) -> bool {
@@ -54,17 +49,94 @@ fn is_ignored(entry: &DirEntry) -> bool {
 
 fn analyze_file_content(path: &Path) -> Vec<DetectedConnection> {
     let mut connections = Vec::new();
-    if let Ok(content) = fs::read_to_string(path) {
-        for cap in IMPORT_REGEX.captures_iter(&content) {
-            
-            if let Some(imported) = cap.get(1).or_else(|| cap.get(2)) {
-                 connections.push(DetectedConnection {
-                    source_file: path.to_path_buf(),
-                    imported_string: imported.as_str().trim().to_string(),
-                });
-            }
+    let file_content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return connections,
+    };
+
+    let language_ref = match path.extension().and_then(|ext| ext.to_str()) {
+        Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => unsafe { &tree_sitter_javascript() },
+        Some("ts") => unsafe { &tree_sitter_typescript() },
+        Some("tsx") => unsafe { &tree_sitter_tsx() },
+        _ => return connections,
+    };
+
+    let mut parser = Parser::new();
+    if parser.set_language(language_ref).is_err() {
+        eprintln!("Error setting language for file: {}", path.display());
+        return connections;
+    }
+
+    let tree = match parser.parse(&file_content, None) {
+        Some(tree) => tree,
+        None => {
+            eprintln!("Error parsing file: {}", path.display());
+            return connections;
         }
-    } 
+    };
+
+    // Define tree-sitter queries for different import types
+    // Updated query for TS/TSX compatibility - Removed import_declaration attempt
+    let import_query_str = r#"
+        [
+          ; Static ES6 Imports & Exports from '...'
+          (import_statement source: (string) @import_path)
+          (export_statement source: (string) @import_path)
+
+          ; CommonJS Requires: require('...') or require`...`
+          (call_expression
+            function: (identifier) @require_func (#eq? @require_func "require")
+            arguments: (arguments (string) @import_path))
+          (call_expression
+            function: (identifier) @require_func (#eq? @require_func "require")
+            arguments: (arguments (template_string) @import_path))
+            
+          ; Dynamic Imports: import('...') or import`...`
+          (call_expression
+            function: (import) @import_func
+            arguments: (arguments (string) @import_path))
+           (call_expression
+            function: (import) @import_func
+            arguments: (arguments (template_string) @import_path))
+            
+           ; Removed: Handle potential 'import_declaration'...
+           ; (import_declaration source: (string) @import_path) 
+        ]
+    "#;
+
+
+    let query = match Query::new(language_ref, import_query_str) {
+        Ok(q) => q,
+        Err(e) => {
+            // Print error with file path for better debugging
+            eprintln!("Error creating query for {}: {:?}", path.display(), e);
+            return connections;
+        }
+    };
+
+    let mut query_cursor = QueryCursor::new();
+    let matches = query_cursor.matches(&query, tree.root_node(), file_content.as_bytes());
+
+    for mat in matches {
+        // Find the capture named "import_path"
+        for cap in mat.captures {
+             if query.capture_names()[cap.index as usize] == "import_path" {
+                let node = cap.node;
+                if let Some(import_path_raw) = file_content.get(node.byte_range()) {
+                     // Remove quotes (single, double) or backticks
+                     let import_path = import_path_raw.trim_matches(|c| c == '\'' || c == '"' || c == '`').to_string();
+                     if !import_path.is_empty() {
+                         connections.push(DetectedConnection {
+                            source_file: path.to_path_buf(),
+                            imported_string: import_path,
+                        });
+                     }
+                 }
+                break; // Found the import_path, no need to check other captures in this match
+             }
+         }
+    }
+
     connections
 }
 
@@ -139,29 +211,56 @@ pub fn generate_structure_section(root_path: &Path, files: &[PathBuf]) -> String
 
 pub fn generate_connections_section(root_path: &Path, connections: &[DetectedConnection]) -> String {
     let mut section = String::new();
-    section.push_str("## Detected Connections (Heuristic)\n\n");
+    section.push_str("## Detected Connections (Tree)\n\n");
+
     if connections.is_empty() {
         section.push_str("_No connections detected._\n");
-    } else {
-        let mut sorted_connections = connections.to_vec();
-        sorted_connections.sort_by_key(|c| c.source_file.clone());
+        return section;
+    }
 
-        for conn in sorted_connections {
-             if let Ok(relative_source) = conn.source_file.strip_prefix(root_path) {
-                 section.push_str(&format!(
-                    "- `{}` imports `{}`\n",
-                    relative_source.display(),
-                    conn.imported_string
-                ));
-            } else {
-                 section.push_str(&format!(
-                    "- `{}` imports `{}`\n",
-                    conn.source_file.display(), 
-                    conn.imported_string
-                ));
+    // 1. Group connections by source file
+    let mut grouped_connections: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    for conn in connections {
+        grouped_connections
+            .entry(conn.source_file.clone())
+            .or_default()
+            .push(conn.imported_string.clone());
+    }
+
+    // 2. Get sorted source files
+    let mut sorted_files: Vec<PathBuf> = grouped_connections.keys().cloned().collect();
+    sorted_files.sort();
+
+    // 3. Build the tree string
+    section.push_str("```\n");
+    let num_files = sorted_files.len();
+    for (i, file_path) in sorted_files.iter().enumerate() {
+        let is_last_file = i == num_files - 1;
+        let file_prefix = if is_last_file { "└── " } else { "├── " };
+
+        // Display relative path if possible
+        let display_path = file_path
+            .strip_prefix(root_path)
+            .unwrap_or(file_path)
+            .display();
+
+        section.push_str(&format!("{}{}\n", file_prefix, display_path));
+
+        // Get and sort imports for this file
+        if let Some(imports) = grouped_connections.get_mut(file_path) {
+            imports.sort();
+            let num_imports = imports.len();
+            let base_indent = if is_last_file { "    " } else { "│   " };
+
+            for (j, import_str) in imports.iter().enumerate() {
+                let is_last_import = j == num_imports - 1;
+                let import_prefix = if is_last_import { "└── " } else { "├── " };
+                section.push_str(&format!("{}{}{}\n", base_indent, import_prefix, import_str));
             }
         }
     }
+    section.push_str("```\n");
+
     section
 }
 
@@ -233,22 +332,22 @@ pub fn start_analysis(path_to_scan: PathBuf) -> Receiver<AnalysisResult> {
 }
 
 
-pub fn generate_context_text(
-    root_path: &Path,
-    files: &[PathBuf],
-    connections: &[DetectedConnection],
-    include_content: bool,
-) -> String {
-    let mut context = String::new();
+// pub fn generate_context_text(
+//     root_path: &Path,
+//     files: &[PathBuf],
+//     connections: &[DetectedConnection],
+//     include_content: bool,
+// ) -> String {
+//     let mut context = String::new();
 
-    context.push_str(&generate_structure_section(root_path, files));
-    context.push_str("\n"); 
-    context.push_str(&generate_connections_section(root_path, connections));
+//     context.push_str(&generate_structure_section(root_path, files));
+//     context.push_str("\n"); 
+//     context.push_str(&generate_connections_section(root_path, connections));
 
-    if include_content {
-        context.push_str("\n"); 
-        context.push_str(&generate_file_content_section(root_path, files));
-    }
+//     if include_content {
+//         context.push_str("\n"); 
+//         context.push_str(&generate_file_content_section(root_path, files));
+//     }
 
-    context
-} 
+//     context
+// } 

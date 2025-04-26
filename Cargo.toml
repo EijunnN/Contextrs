@@ -3,6 +3,9 @@ name = "context-lens"
 version = "0.1.0"
 edition = "2024"
 
+[build-dependencies]
+cc = "1.0"
+
 [dependencies]
 eframe = "0.27.2"
 egui = "0.27.2"
@@ -16,3 +19,8 @@ walkdir = "2"
 regex = "1"
 lazy_static = "1.4"
 rayon = "1"
+
+# Dependencias para Tree-sitter
+tree-sitter = "0.22.6" # Usamos una versión reciente y estable
+tree-sitter-javascript = "0.21.0"
+tree-sitter-typescript = "0.21.0" # Incluye soporte para TS y TSX
