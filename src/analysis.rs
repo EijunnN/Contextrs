@@ -272,22 +272,49 @@ pub fn generate_file_content_section(root_path: &Path, files: &[PathBuf]) -> Str
     sorted_files.sort();
 
     for file_path in sorted_files {
-            if let Ok(relative_path) = file_path.strip_prefix(root_path) {
-            section.push_str(&format!("### `{}`\n\n", relative_path.display()));
-            section.push_str("```");
-            if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
-                section.push_str(ext);
-            }
-            section.push('\n');
-            match fs::read_to_string(&file_path) {
-                Ok(content) => section.push_str(&content),
-                Err(e) => section.push_str(&format!("[Error reading file: {}]", e)),
-            }
-            section.push_str("\n```\n\n");
-        } else {
-                section.push_str(&format!("### `{}`\n\n", file_path.display()));
-                section.push_str("```\n[Could not determine relative path]\n```\n\n");
+        let relative_path_display = match file_path.strip_prefix(root_path) {
+            Ok(relative_path) => relative_path.display().to_string(),
+            Err(_) => file_path.display().to_string(), // Use full path if strip fails
+        };
+
+        section.push_str(&format!("### `{}`\n\n", relative_path_display));
+        section.push_str("```");
+        if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
+            section.push_str(ext);
         }
+        section.push('\n');
+
+        match fs::read_to_string(&file_path) {
+            Ok(content) => {
+                let lines: Vec<&str> = content.lines().collect();
+                let num_lines = lines.len();
+                // Calculate padding width based on the largest line number
+                let width = if num_lines == 0 { 1 } else { num_lines.to_string().len() };
+
+                for (i, line) in lines.iter().enumerate() {
+                    let line_number = i + 1;
+                    section.push_str(&format!("{:>width$} | {}
+", line_number, line, width = width));
+                }
+                 // Add a final newline if the original content ended with one
+                 if content.ends_with('\n') && !lines.is_empty() {
+                     // The loop already added \n for the last line, so we don't need to do anything extra here.
+                     // If the content was *only* a newline, the loop wouldn't run, but `lines` would contain [""], 
+                     // so this condition handles it correctly.
+                 } else if content.is_empty() {
+                    // Handle empty file - do nothing extra
+                 } else if !content.ends_with('\n') && !lines.is_empty() {
+                     // If the file did not end with a newline, remove the last added newline by the loop
+                     if section.ends_with('\n') { section.pop(); }
+                 }
+            }
+            Err(e) => section.push_str(&format!("[Error reading file: {}]", e)),
+        }
+
+        section.push_str("
+```
+
+");
     }
     section
 }
