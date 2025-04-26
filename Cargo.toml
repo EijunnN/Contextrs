@@ -7,11 +7,10 @@ edition = "2024"
 eframe = "0.27.2"
 egui = "0.27.2"
 
-# Dependencias para el diálogo de selección de carpeta y portapapeles (según PRD)
 rfd = "0.14"
 arboard = "3"
 
-# Dependencias para el escaneo y análisis (según PRD)
+
 walkdir = "2"
 regex = "1"
 lazy_static = "1.4"
