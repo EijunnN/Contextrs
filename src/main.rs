@@ -1,20 +1,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // Ocultar consola en Windows release
 
 mod analysis;
+mod reporting;
 
 use std::path::{ PathBuf};
 use std::sync::mpsc::{ Receiver};
 use std::time::{Duration, Instant};
 
-
-use analysis::{AnalysisResult, DetectedConnection};
+use analysis::{AnalysisResult, DetectedConnection, DetectedDefinition};
 use arboard::Clipboard;
 
 #[derive(Clone, Debug)]
 enum ScanStatus {
     Idle,
     Scanning,
-    Completed(PathBuf, Vec<PathBuf>, Vec<DetectedConnection>),
+    Completed(PathBuf, Vec<PathBuf>, Vec<DetectedConnection>, Vec<DetectedDefinition>),
     Error(String),
 }
 
@@ -47,6 +47,7 @@ struct MyApp {
     structure_section: Option<String>,
     connections_section: Option<String>,
     file_content_section: Option<String>,
+    definitions_section: Option<String>,
 }
 
 impl Default for MyApp {
@@ -59,6 +60,7 @@ impl Default for MyApp {
             structure_section: None,
             connections_section: None,
             file_content_section: None,
+            definitions_section: None,
         }
     }
 }
@@ -90,8 +92,8 @@ impl eframe::App for MyApp {
         if let Some(rx) = &self.scan_receiver {
             if let Ok(result) = rx.try_recv() {
                 match result {
-                    Ok((root_path, files, connections)) => {
-                        self.scan_status = ScanStatus::Completed(root_path, files, connections);
+                    Ok((root_path, files, connections, definitions)) => {
+                        self.scan_status = ScanStatus::Completed(root_path, files, connections, definitions);
                         trigger_section_generation = true;
                     }
                     Err(err_msg) => {
@@ -121,7 +123,7 @@ impl eframe::App for MyApp {
                 ui.separator();
 
                 
-                let is_completed = matches!(self.scan_status, ScanStatus::Completed(_, _, _));
+                let is_completed = matches!(self.scan_status, ScanStatus::Completed(_, _, _, _));
                 let checkbox_changed = ui.add_enabled(is_completed, egui::Checkbox::new(&mut self.include_file_content, "Incluir contenido")).changed();
                 if checkbox_changed && is_completed {
                     trigger_content_generation_only = true;
@@ -137,6 +139,11 @@ impl eframe::App for MyApp {
                 }
                 if ui.add_enabled(copy_enabled, egui::Button::new("Copiar Conexiones")).clicked() {
                     if let Some(text) = &self.connections_section {
+                        copy_to_clipboard(text, &mut self.copy_notification);
+                    }
+                }
+                if ui.add_enabled(copy_enabled, egui::Button::new("Copiar Definiciones")).clicked() {
+                    if let Some(text) = &self.definitions_section {
                         copy_to_clipboard(text, &mut self.copy_notification);
                     }
                 }
@@ -158,19 +165,20 @@ impl eframe::App for MyApp {
 
         
         if trigger_section_generation {
-             if let ScanStatus::Completed(root_path, files, connections) = &self.scan_status {
-                 self.structure_section = Some(analysis::generate_structure_section(root_path, files));
-                 self.connections_section = Some(analysis::generate_connections_section(root_path, connections));
+             if let ScanStatus::Completed(root_path, files, connections, definitions) = &self.scan_status {
+                 self.structure_section = Some(reporting::generate_structure_section(root_path, files));
+                 self.connections_section = Some(reporting::generate_connections_section(root_path, connections));
+                 self.definitions_section = Some(reporting::generate_definitions_section(root_path, definitions));
                  if self.include_file_content {
-                     self.file_content_section = Some(analysis::generate_file_content_section(root_path, files));
+                     self.file_content_section = Some(reporting::generate_file_content_section(root_path, files));
                  } else {
                      self.file_content_section = None;
                  }
             }
         } else if trigger_content_generation_only {
-            if let ScanStatus::Completed(root_path, files, _) = &self.scan_status {
+            if let ScanStatus::Completed(root_path, files, _, _) = &self.scan_status {
                  if self.include_file_content {
-                     self.file_content_section = Some(analysis::generate_file_content_section(root_path, files));
+                     self.file_content_section = Some(reporting::generate_file_content_section(root_path, files));
                  } else {
                      self.file_content_section = None;
                  }
@@ -183,7 +191,7 @@ impl eframe::App for MyApp {
              match &self.scan_status {
                 ScanStatus::Idle => { ui.label("Selecciona una carpeta de proyecto para analizar."); }
                 ScanStatus::Scanning => { ui.horizontal(|ui| { ui.spinner(); ui.label("Analizando archivos..."); }); }
-                ScanStatus::Completed(root_path, _, _) => {
+                ScanStatus::Completed(root_path, _, _, _) => {
                     ui.label(format!("Carpeta analizada: {}", root_path.display()));
                     ui.separator();
                     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -193,6 +201,10 @@ impl eframe::App for MyApp {
                          if let Some(connections) = &self.connections_section {
                              ui.separator();
                             Self::display_section(ui, "connections_section", connections);
+                        }
+                        if let Some(definitions) = &self.definitions_section {
+                             ui.separator();
+                            Self::display_section(ui, "definitions_section", definitions);
                         }
                         if self.include_file_content {
                             if let Some(content) = &self.file_content_section {
@@ -213,6 +225,7 @@ impl MyApp {
         self.structure_section = None;
         self.connections_section = None;
         self.file_content_section = None;
+        self.definitions_section = None;
     }
 
     fn rebuild_full_context(&self) -> String {
@@ -224,6 +237,10 @@ impl MyApp {
         if let Some(c) = &self.connections_section {
             full_context.push_str(c);
              full_context.push_str("\n\n");
+        }
+        if let Some(d) = &self.definitions_section {
+            full_context.push_str(d);
+            full_context.push_str("\n\n");
         }
         if self.include_file_content {
             if let Some(fc) = &self.file_content_section {

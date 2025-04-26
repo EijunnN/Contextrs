@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use walkdir::{DirEntry, WalkDir};
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashSet};
 use rayon::prelude::*;
-use tree_sitter::{Parser, Language, Query, QueryCursor};
+use tree_sitter::{Parser, Language, Query, QueryCursor, Node};
 
 
 
@@ -21,8 +21,16 @@ pub struct DetectedConnection {
 
 }
 
+#[derive(Clone, Debug)]
+pub struct DetectedDefinition {
+    pub source_file: PathBuf,
+    pub symbol_name: String,
+    pub kind: String, // e.g., "Function", "Class", "Const", "Let", "Var", "Export"
+    pub line_number: usize, // Line number where the definition starts
+}
 
-pub type AnalysisResult = Result<(PathBuf, Vec<PathBuf>, Vec<DetectedConnection>), String>;
+
+pub type AnalysisResult = Result<(PathBuf, Vec<PathBuf>, Vec<DetectedConnection>, Vec<DetectedDefinition>), String>;
 
 // --- Tree-sitter Languages (Extern declarations) ---
 unsafe extern "C" { fn tree_sitter_javascript() -> Language; }
@@ -47,31 +55,32 @@ fn is_ignored(entry: &DirEntry) -> bool {
 }
 
 
-fn analyze_file_content(path: &Path) -> Vec<DetectedConnection> {
+fn analyze_file_content(path: &Path) -> (Vec<DetectedConnection>, Vec<DetectedDefinition>) {
     let mut connections = Vec::new();
+    let mut definitions = Vec::new();
     let file_content = match fs::read_to_string(path) {
         Ok(content) => content,
-        Err(_) => return connections,
+        Err(_) => return (connections, definitions),
     };
 
     let language_ref = match path.extension().and_then(|ext| ext.to_str()) {
         Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => unsafe { &tree_sitter_javascript() },
         Some("ts") => unsafe { &tree_sitter_typescript() },
         Some("tsx") => unsafe { &tree_sitter_tsx() },
-        _ => return connections,
+        _ => return (connections, definitions),
     };
 
     let mut parser = Parser::new();
     if parser.set_language(language_ref).is_err() {
         eprintln!("Error setting language for file: {}", path.display());
-        return connections;
+        return (connections, definitions);
     }
 
     let tree = match parser.parse(&file_content, None) {
         Some(tree) => tree,
         None => {
             eprintln!("Error parsing file: {}", path.display());
-            return connections;
+            return (connections, definitions);
         }
     };
 
@@ -110,7 +119,7 @@ fn analyze_file_content(path: &Path) -> Vec<DetectedConnection> {
         Err(e) => {
             // Print error with file path for better debugging
             eprintln!("Error creating query for {}: {:?}", path.display(), e);
-            return connections;
+            return (connections, definitions);
         }
     };
 
@@ -137,186 +146,97 @@ fn analyze_file_content(path: &Path) -> Vec<DetectedConnection> {
          }
     }
 
-    connections
-}
+    // --- NUEVA Consulta para Definiciones y Exportaciones ---
+    let definition_query_str = r#"
+        [
+          ; Funciones
+          (function_declaration name: (identifier) @def.name) @def.function
+          (lexical_declaration
+            (variable_declarator name: (identifier) @def.name value: [
+              (arrow_function)
+              (function_expression)
+            ])
+          ) @def.function.lexical
+          (export_statement declaration: (function_declaration name: (identifier) @def.name)) @def.function.exported.decl
 
+          ; Clases
+          (class_declaration name: (type_identifier) @def.name) @def.class
+          (export_statement declaration: (class_declaration name: (type_identifier) @def.name)) @def.class.exported.decl
 
-fn generate_tree_structure_string(root_path: &Path, files: &[PathBuf]) -> String {
-    let mut tree = String::new();
-    let mut sorted_files = files.to_vec();
-    sorted_files.sort();
-    let mut printed_dirs = HashSet::new();
+          ; Variables/Constantes (exportadas o de nivel superior)
+          (export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @def.name))) @def.var.exported.decl
+          (export_statement (variable_declaration (variable_declarator name: (identifier) @def.name))) @def.var.exported.decl.var
+          ; (program (lexical_declaration (variable_declarator name: (identifier) @def.name))) @def.var.toplevel ; Podría ser muy ruidoso, comentar por ahora
+        ]
+    "#;
 
-    for file_path in sorted_files {
-        if let Ok(relative_path) = file_path.strip_prefix(root_path) {
-            let components: Vec<_> = relative_path.components().collect();
-             // Evitar imprimir la raíz dos veces si solo hay archivos en ella
-            if components.is_empty() || (components.len() == 1 && components[0].as_os_str() == relative_path.as_os_str()) {
-                 if let Some(name) = relative_path.file_name().and_then(|n| n.to_str()) {
-                    tree.push_str("├── ");
-                    tree.push_str(name);
-                    tree.push('\n');
+    let def_query = match Query::new(language_ref, definition_query_str) {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("Error creating definition query for {}: {:?}", path.display(), e);
+            return (connections, definitions); // Retornar definiciones vacías también
+        }
+    };
+
+    let mut def_query_cursor = QueryCursor::new();
+    let def_matches = def_query_cursor.matches(&def_query, tree.root_node(), file_content.as_bytes());
+
+    // Indices para capturas específicas (más eficiente que buscar por nombre en el bucle)
+    let name_capture_index = def_query.capture_index_for_name("def.name");
+    // No necesitamos el índice del nombre del patrón aquí
+
+    for mat in def_matches {
+        let mut definition_name : Option<String> = None;
+        let mut kind_str : Option<String> = None;
+        let mut node_for_line : Option<Node> = None; // Nodo para obtener la línea inicial
+
+        // Iterar sobre las capturas del match actual
+        for cap in mat.captures {
+            let capture_index = cap.index;
+            let capture_name = &def_query.capture_names()[capture_index as usize];
+
+            // Es la captura del nombre? ("def.name")
+            if Some(capture_index) == name_capture_index {
+                if let Some(name_str) = file_content.get(cap.node.byte_range()) {
+                    definition_name = Some(name_str.to_string());
                 }
-                continue; 
             }
-            
-            let mut current_prefix = String::new();
-            for (i, component) in components.iter().enumerate() {
-                let is_last_component = i == components.len() - 1;
-                let component_path = root_path.join(relative_path.iter().take(i + 1).collect::<PathBuf>());
+            // Es una captura que define el tipo? (empieza con "def.")
+            else if capture_name.starts_with("def.") {
+                 kind_str = Some(match *capture_name {
+                     "def.function" | "def.function.lexical" | "def.function.exported" | "def.function.exported.decl" => "Function",
+                     "def.class" | "def.class.exported.decl" => "Class",
+                     "def.var.exported.decl" | "def.var.exported.decl.var" | "def.var.toplevel" => "Variable",
+                     _ => "Definition" // Fallback
+                 }.to_string());
+                 // Usar el nodo de esta captura para la línea, ya que representa el constructo principal
+                 node_for_line = Some(cap.node); 
+            }
+        }
 
-                 if let Some(name) = component.as_os_str().to_str() {
-                    
-                    if !is_last_component {
-                         if printed_dirs.contains(&component_path) {
-                            current_prefix.push_str("│   ");
-                            continue;
-                        } else {
-                            printed_dirs.insert(component_path);
-                            tree.push_str(&current_prefix);
-                            tree.push_str("├── "); 
-                            tree.push_str(name);
-                            tree.push_str("/\n");
-                            current_prefix.push_str("│   ");
-                        }
-                    } else { 
-                        tree.push_str(&current_prefix);
-                        tree.push_str("└── "); 
-                        tree.push_str(name);
-                        tree.push('\n');
-                    }
-                 } else {
-                    tree.push_str(&current_prefix);
-                    tree.push_str("└── [Nombre no UTF-8]\n"); 
-                    break; 
-                 }
+        // Si no encontramos un nodo específico para la línea (quizás la consulta solo tenía @def.name?)
+        // usamos el primer nodo del match como fallback razonable.
+        if node_for_line.is_none() {
+             if let Some(first_capture) = mat.captures.first() {
+                 node_for_line = Some(first_capture.node);
+             }
+        }
+
+        // Si tenemos toda la información necesaria, la añadimos
+        if let (Some(name), Some(kind), Some(node)) = (definition_name, kind_str, node_for_line) {
+            if !name.is_empty() { // Asegurarnos de que el nombre no esté vacío
+                definitions.push(DetectedDefinition {
+                    source_file: path.to_path_buf(),
+                    symbol_name: name,
+                    kind: kind,
+                    line_number: node.start_position().row + 1, // tree-sitter es 0-indexed
+                });
             }
         }
     }
-    tree
-}
+    // --- Fin de la consulta de Definiciones ---
 
-// --- Generadores de Secciones (Públicos) ---
-pub fn generate_structure_section(root_path: &Path, files: &[PathBuf]) -> String {
-    let mut section = String::new();
-    section.push_str("## Project Structure\n\n");
-    section.push_str("```\n");
-    section.push_str(root_path.file_name().unwrap_or_default().to_str().unwrap_or("ROOT"));
-    section.push('\n');
-    section.push_str(&generate_tree_structure_string(root_path, files));
-    section.push_str("```\n");
-    section
-}
-
-
-pub fn generate_connections_section(root_path: &Path, connections: &[DetectedConnection]) -> String {
-    let mut section = String::new();
-    section.push_str("## Detected Connections (Tree)\n\n");
-
-    if connections.is_empty() {
-        section.push_str("_No connections detected._\n");
-        return section;
-    }
-
-    // 1. Group connections by source file
-    let mut grouped_connections: HashMap<PathBuf, Vec<String>> = HashMap::new();
-    for conn in connections {
-        grouped_connections
-            .entry(conn.source_file.clone())
-            .or_default()
-            .push(conn.imported_string.clone());
-    }
-
-    // 2. Get sorted source files
-    let mut sorted_files: Vec<PathBuf> = grouped_connections.keys().cloned().collect();
-    sorted_files.sort();
-
-    // 3. Build the tree string
-    section.push_str("```\n");
-    let num_files = sorted_files.len();
-    for (i, file_path) in sorted_files.iter().enumerate() {
-        let is_last_file = i == num_files - 1;
-        let file_prefix = if is_last_file { "└── " } else { "├── " };
-
-        // Display relative path if possible
-        let display_path = file_path
-            .strip_prefix(root_path)
-            .unwrap_or(file_path)
-            .display();
-
-        section.push_str(&format!("{}{}\n", file_prefix, display_path));
-
-        // Get and sort imports for this file
-        if let Some(imports) = grouped_connections.get_mut(file_path) {
-            imports.sort();
-            let num_imports = imports.len();
-            let base_indent = if is_last_file { "    " } else { "│   " };
-
-            for (j, import_str) in imports.iter().enumerate() {
-                let is_last_import = j == num_imports - 1;
-                let import_prefix = if is_last_import { "└── " } else { "├── " };
-                section.push_str(&format!("{}{}{}\n", base_indent, import_prefix, import_str));
-            }
-        }
-    }
-    section.push_str("```\n");
-
-    section
-}
-
-
-pub fn generate_file_content_section(root_path: &Path, files: &[PathBuf]) -> String {
-     let mut section = String::new();
-    section.push_str("## File Contents\n\n");
-    let mut sorted_files = files.to_vec();
-    sorted_files.sort();
-
-    for file_path in sorted_files {
-        let relative_path_display = match file_path.strip_prefix(root_path) {
-            Ok(relative_path) => relative_path.display().to_string(),
-            Err(_) => file_path.display().to_string(), // Use full path if strip fails
-        };
-
-        section.push_str(&format!("### `{}`\n\n", relative_path_display));
-        section.push_str("```");
-        if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
-            section.push_str(ext);
-        }
-        section.push('\n');
-
-        match fs::read_to_string(&file_path) {
-            Ok(content) => {
-                let lines: Vec<&str> = content.lines().collect();
-                let num_lines = lines.len();
-                // Calculate padding width based on the largest line number
-                let width = if num_lines == 0 { 1 } else { num_lines.to_string().len() };
-
-                for (i, line) in lines.iter().enumerate() {
-                    let line_number = i + 1;
-                    section.push_str(&format!("{:>width$} | {}
-", line_number, line, width = width));
-                }
-                 // Add a final newline if the original content ended with one
-                 if content.ends_with('\n') && !lines.is_empty() {
-                     // The loop already added \n for the last line, so we don't need to do anything extra here.
-                     // If the content was *only* a newline, the loop wouldn't run, but `lines` would contain [""], 
-                     // so this condition handles it correctly.
-                 } else if content.is_empty() {
-                    // Handle empty file - do nothing extra
-                 } else if !content.ends_with('\n') && !lines.is_empty() {
-                     // If the file did not end with a newline, remove the last added newline by the loop
-                     if section.ends_with('\n') { section.pop(); }
-                 }
-            }
-            Err(e) => section.push_str(&format!("[Error reading file: {}]", e)),
-        }
-
-        section.push_str("
-```
-
-");
-    }
-    section
+    (connections, definitions) // Devolver ambos vectores
 }
 
 
@@ -335,23 +255,25 @@ pub fn start_analysis(path_to_scan: PathBuf) -> Receiver<AnalysisResult> {
             .filter(|entry| entry.path().is_file() && !is_ignored(entry))
             .collect();
 
-        let results: Vec<(PathBuf, Vec<DetectedConnection>)> = walker
+        let results: Vec<(PathBuf, Vec<DetectedConnection>, Vec<DetectedDefinition>)> = walker
             .par_iter()
             .map(|entry| {
                 let path = entry.path().to_path_buf();
-                let connections = analyze_file_content(&path);
-                (path, connections)
+                let (connections, definitions) = analyze_file_content(&path);
+                (path, connections, definitions)
             })
             .collect();
 
         let mut files = Vec::with_capacity(results.len());
         let mut connections = Vec::new();
-        for (path, file_connections) in results {
+        let mut definitions = Vec::new();
+        for (path, file_connections, file_definitions) in results {
             files.push(path);
             connections.extend(file_connections);
+            definitions.extend(file_definitions);
         }
 
-        let result = Ok((root_path, files, connections));
+        let result = Ok((root_path, files, connections, definitions));
         tx.send(result).ok();
     });
 
