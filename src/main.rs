@@ -47,7 +47,7 @@ struct MyApp {
     // --- Generated Section Content ---
     // Now storing structured data for interactivity
     structure_section: Option<Vec<reporting::ReportItem>>,
-    connections_section: Option<String>, // TODO: Update to Vec<ReportItem>
+    connections_section: Option<Vec<reporting::ReportItem>>,
     file_content_section: Option<String>, // Keep as String for now
     definitions_section: Option<String>, // TODO: Update to Vec<ReportItem>
     inverse_usage_section: Option<String>, // TODO: Update to Vec<ReportItem>
@@ -70,6 +70,7 @@ struct MyApp {
     show_modal: bool,
     modal_file_path: Option<PathBuf>,
     modal_file_content: Option<String>,
+    modal_copy_include_path: bool,
 }
 
 impl Default for MyApp {
@@ -101,6 +102,7 @@ impl Default for MyApp {
             show_modal: false,
             modal_file_path: None,
             modal_file_content: None,
+            modal_copy_include_path: false,
         }
     }
 }
@@ -180,8 +182,10 @@ impl eframe::App for MyApp {
                     }
                 }
                 if ui.add_enabled(copy_enabled, egui::Button::new("Copiar Conexiones")).clicked() {
-                    if let Some(text) = &self.connections_section {
-                        copy_to_clipboard(text, &mut self.copy_notification);
+                    if let Some(items) = &self.connections_section {
+                        // Convert ReportItems to String before copying
+                        let text_to_copy = Self::report_items_to_string(items);
+                        copy_to_clipboard(&text_to_copy, &mut self.copy_notification);
                     }
                 }
                 if ui.add_enabled(copy_enabled, egui::Button::new("Copiar Definiciones")).clicked() {
@@ -359,12 +363,10 @@ impl eframe::App for MyApp {
                         }
                         if app_state.show_connections {
                             if let Some(connections) = &app_state.connections_section {
-                                // TODO: Update display_section call when connections uses ReportItem
-                                // Self::display_section(ui, "connections_section", connections, &mut app_state); // Temporarily commented out
-                                ui.strong("Conexiones Detectadas"); // Temporary heading
-                                ui.add_space(2.0);
-                                let mut text = connections.clone();
-                                ui.add(egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY));
+                                // Pass the &[ReportItem] slice directly
+                                if let Some(path) = Self::display_section(ui, "connections_section", connections) {
+                                     clicked_path_in_scroll = Some(path);
+                                }
                                 ui.separator();
                             }
                         }
@@ -430,6 +432,34 @@ impl eframe::App for MyApp {
                 .resizable(true)
                 .scroll2([true, true]) // Enable scrolling
                 .show(ctx, |ui| {
+                    // Add a copy button and checkbox at the top
+                    ui.horizontal(|ui|{
+                        if ui.button("Copiar Contenido").clicked() {
+                            if let Some(content) = &self.modal_file_content {
+                                let mut text_to_copy = content.clone();
+                                // Prepend path if checkbox is checked and path exists
+                                if self.modal_copy_include_path {
+                                    if let Some(path) = &self.modal_file_path {
+                                        let path_str = path.display().to_string();
+                                        // Use a common comment style (adjust if needed for specific languages later)
+                                        text_to_copy = format!("// File: {}\n\n{}", path_str, content);
+                                    }
+                                }
+                                copy_to_clipboard(&text_to_copy, &mut self.copy_notification);
+                            }
+                        }
+                        // Checkbox to include path
+                        ui.checkbox(&mut self.modal_copy_include_path, "Incluir path");
+                        
+                        // Display copy notification within the modal as well
+                         if let Some(copy_time) = self.copy_notification {
+                            if copy_time.elapsed() < Duration::from_secs(2) {
+                                ui.label(egui::RichText::new(" ¡Copiado!").color(egui::Color32::GREEN));
+                            } // Resetting happens in the main UI update
+                        }
+                    });
+                    ui.separator();
+
                     if let Some(content) = &self.modal_file_content {
                          // Use a text edit for selection and copying, but make it read-only
                          let mut content_display = content.clone();
@@ -485,8 +515,9 @@ impl MyApp {
             full_context.push_str(&structure_text);
             full_context.push_str("\n\n");
         }
-        if let Some(c) = &self.connections_section { // Stays String for now
-            full_context.push_str(c);
+        if let Some(items) = &self.connections_section {
+            let connections_text = Self::report_items_to_string(items);
+            full_context.push_str(&connections_text);
              full_context.push_str("\n\n");
         }
         if let Some(d) = &self.definitions_section {
