@@ -44,13 +44,15 @@ struct MyApp {
     include_file_content: bool,
     copy_notification: Option<Instant>,
 
-    structure_section: Option<String>,
-    connections_section: Option<String>,
-    file_content_section: Option<String>,
-    definitions_section: Option<String>,
-    inverse_usage_section: Option<String>,
+    // --- Generated Section Content ---
+    // Now storing structured data for interactivity
+    structure_section: Option<Vec<reporting::ReportItem>>,
+    connections_section: Option<String>, // TODO: Update to Vec<ReportItem>
+    file_content_section: Option<String>, // Keep as String for now
+    definitions_section: Option<String>, // TODO: Update to Vec<ReportItem>
+    inverse_usage_section: Option<String>, // TODO: Update to Vec<ReportItem>
 
-    // --- State for section visibility ---
+    // --- UI State ---
     show_structure: bool,
     show_connections: bool,
     show_definitions: bool,
@@ -63,6 +65,11 @@ struct MyApp {
     filter_definitions: String,
     filter_inverse_usage: String,
     // Note: Filtering file content directly might be too slow/complex for now
+
+    // --- Modal State ---
+    show_modal: bool,
+    modal_file_path: Option<PathBuf>,
+    modal_file_content: Option<String>,
 }
 
 impl Default for MyApp {
@@ -89,6 +96,11 @@ impl Default for MyApp {
             filter_connections: String::new(),
             filter_definitions: String::new(),
             filter_inverse_usage: String::new(),
+
+            // Initialize modal state
+            show_modal: false,
+            modal_file_path: None,
+            modal_file_content: None,
         }
     }
 }
@@ -161,8 +173,10 @@ impl eframe::App for MyApp {
                 
                 let copy_enabled = is_completed;
                 if ui.add_enabled(copy_enabled, egui::Button::new("Copiar Estructura")).clicked() {
-                    if let Some(text) = &self.structure_section {
-                        copy_to_clipboard(text, &mut self.copy_notification);
+                    if let Some(items) = &self.structure_section {
+                        // Convert ReportItems to String before copying
+                        let text_to_copy = Self::report_items_to_string(items);
+                        copy_to_clipboard(&text_to_copy, &mut self.copy_notification);
                     }
                 }
                 if ui.add_enabled(copy_enabled, egui::Button::new("Copiar Conexiones")).clicked() {
@@ -329,48 +343,132 @@ impl eframe::App for MyApp {
                 ScanStatus::Completed(root_path, _, _, _) => {
                     ui.label(format!("Carpeta analizada: {}", root_path.display()));
                     ui.separator();
+                    let mut clicked_path_in_scroll: Option<PathBuf> = None;
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        // Conditionally display sections based on visibility flags
-                        if self.show_structure {
-                            if let Some(structure) = &self.structure_section {
-                                Self::display_section(ui, "structure_section", structure);
+                        // Borrow self immutably within the scroll area
+                        let app_state = &*self; // Use immutable borrow inside closure
+                        
+                        if app_state.show_structure {
+                            if let Some(structure) = &app_state.structure_section {
+                                // Display section and capture potential click
+                                if let Some(path) = Self::display_section(ui, "structure_section", structure) {
+                                    clicked_path_in_scroll = Some(path);
+                                }
                                 ui.separator();
                             }
                         }
-                        if self.show_connections {
-                            if let Some(connections) = &self.connections_section {
-                                Self::display_section(ui, "connections_section", connections);
+                        if app_state.show_connections {
+                            if let Some(connections) = &app_state.connections_section {
+                                // TODO: Update display_section call when connections uses ReportItem
+                                // Self::display_section(ui, "connections_section", connections, &mut app_state); // Temporarily commented out
+                                ui.strong("Conexiones Detectadas"); // Temporary heading
+                                ui.add_space(2.0);
+                                let mut text = connections.clone();
+                                ui.add(egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY));
                                 ui.separator();
                             }
                         }
-                        if self.show_definitions {
-                            if let Some(definitions) = &self.definitions_section {
-                                Self::display_section(ui, "definitions_section", definitions);
+                        if app_state.show_definitions {
+                            if let Some(definitions) = &app_state.definitions_section {
+                                // TODO: Update display_section call when definitions uses ReportItem
+                                // Self::display_section(ui, "definitions_section", definitions, &mut app_state); // Temporarily commented out
+                                ui.strong("Definiciones y Exportaciones"); // Temporary heading
+                                ui.add_space(2.0);
+                                let mut text = definitions.clone();
+                                ui.add(egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY));
                                 ui.separator();
                             }
                         }
-                        if self.show_inverse_usage {
-                            if let Some(inverse_usage) = &self.inverse_usage_section {
-                                Self::display_section(ui, "inverse_usage_section", inverse_usage);
+                        if app_state.show_inverse_usage {
+                            if let Some(inverse_usage) = &app_state.inverse_usage_section {
+                                // TODO: Update display_section call when inverse_usage uses ReportItem
+                                // Self::display_section(ui, "inverse_usage_section", inverse_usage, &mut app_state); // Temporarily commented out
+                                ui.strong("Usos Inversos"); // Temporary heading
+                                ui.add_space(2.0);
+                                let mut text = inverse_usage.clone();
+                                ui.add(egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY));
                                 ui.separator();
                             }
                         }
-                        // Show content only if it was generated AND visibility is enabled
-                        if self.include_file_content && self.show_file_content {
-                            if let Some(content) = &self.file_content_section {
-                                Self::display_section(ui, "content_section", content);
-                                // No separator needed after the last possible section
+                        // File content display remains the same for now
+                        if app_state.include_file_content && app_state.show_file_content {
+                            if let Some(content) = &app_state.file_content_section {
+                                ui.strong("Contenido de Archivos"); // Temporary heading
+                                ui.add_space(2.0);
+                                let mut text = content.clone();
+                                ui.add(egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY));
                             }
                         }
-                    });
+                    }); // End of ScrollArea
+
+                    // -- Handle click AFTER ScrollArea --
+                    if let Some(path) = clicked_path_in_scroll {
+                        self.show_modal = true;
+                        self.modal_file_path = Some(path.clone());
+                        match std::fs::read_to_string(&path) {
+                            Ok(content) => self.modal_file_content = Some(content),
+                            Err(e) => self.modal_file_content = Some(format!("[Error al leer el archivo: {}]", e)),
+                        }
+                    }
                 }
                 ScanStatus::Error(msg) => { ui.colored_label(egui::Color32::RED, format!("Error: {}", msg)); }
             }
         });
+
+        // --- Modal Window Logic ---
+        if self.show_modal {
+            let mut is_open = true; // Control variable for the window
+            let file_name = self.modal_file_path.as_ref()
+                              .and_then(|p| p.file_name())
+                              .and_then(|n| n.to_str())
+                              .unwrap_or("Archivo");
+            
+            egui::Window::new(format!("Contenido: {}", file_name))
+                .open(&mut is_open)
+                .default_width(600.0)
+                .default_height(400.0)
+                .resizable(true)
+                .scroll2([true, true]) // Enable scrolling
+                .show(ctx, |ui| {
+                    if let Some(content) = &self.modal_file_content {
+                         // Use a text edit for selection and copying, but make it read-only
+                         let mut content_display = content.clone();
+                         ui.add_sized(ui.available_size(), 
+                            egui::TextEdit::multiline(&mut content_display)
+                                .code_editor()
+                                .desired_width(f32::INFINITY)
+                                .lock_focus(true) // Prevent accidental edits
+                         );
+                    } else {
+                        ui.label("No se pudo cargar el contenido.");
+                    }
+            });
+
+            // If the window was closed (by clicking 'x'), update the state
+            if !is_open {
+                self.show_modal = false;
+                self.modal_file_path = None;
+                self.modal_file_content = None;
+            }
+        }
     }
 }
 
 impl MyApp {
+    // --- NEW Helper function ---
+    fn report_items_to_string(items: &[reporting::ReportItem]) -> String {
+        let mut result = String::new();
+        for item in items {
+            match item {
+                reporting::ReportItem::PlainText(text) => result.push_str(text),
+                // For FilePath, just use the display string for copying/full context
+                reporting::ReportItem::FilePath { display, .. } => result.push_str(display),
+            }
+            result.push('\n'); // Add newline between items for readability
+        }
+        result.trim_end().to_string() // Remove trailing newline if any
+    }
+
     fn clear_generated_sections(&mut self) {
         self.structure_section = None;
         self.connections_section = None;
@@ -381,11 +479,13 @@ impl MyApp {
 
     fn rebuild_full_context(&self) -> String {
         let mut full_context = String::new();
-        if let Some(s) = &self.structure_section {
-            full_context.push_str(s);
+        if let Some(items) = &self.structure_section {
+             // Convert ReportItems to String for full context
+            let structure_text = Self::report_items_to_string(items);
+            full_context.push_str(&structure_text);
             full_context.push_str("\n\n");
         }
-        if let Some(c) = &self.connections_section {
+        if let Some(c) = &self.connections_section { // Stays String for now
             full_context.push_str(c);
              full_context.push_str("\n\n");
         }
@@ -405,26 +505,44 @@ impl MyApp {
         full_context.trim_end().to_string()
     }
 
-    fn display_section(ui: &mut egui::Ui, id_source: &str, text_content: &str) {
+    // UPDATED: Returns Option<PathBuf> on click instead of modifying state directly
+    fn display_section(ui: &mut egui::Ui, id_source: &str, items: &[reporting::ReportItem]) -> Option<PathBuf> {
+        let mut clicked_path: Option<PathBuf> = None;
+
         // Add a heading before each section
         let heading = match id_source {
             "structure_section" => "Estructura del Proyecto",
-            "connections_section" => "Conexiones Detectadas",
-            "definitions_section" => "Definiciones y Exportaciones",
-            "inverse_usage_section" => "Usos Inversos",
+            "connections_section" => "Conexiones Detectadas", // TODO: Update when these use ReportItem
+            "definitions_section" => "Definiciones y Exportaciones", // TODO: Update when these use ReportItem
+            "inverse_usage_section" => "Usos Inversos", // TODO: Update when these use ReportItem
             "content_section" => "Contenido de Archivos",
             _ => "Sección", // Fallback heading
         };
         ui.strong(heading);
         ui.add_space(2.0);
 
-        let mut display_text = text_content.to_string();
-        ui.add(
-            egui::TextEdit::multiline(&mut display_text)
-                .id_source(id_source) 
-                .code_editor()
-                .desired_width(f32::INFINITY)
-                .lock_focus(true)
-        );
+        // Render items, making FilePaths clickable
+        // Using a code block style for consistent spacing
+        egui::Frame::none().show(ui, |ui| { // Use a frame for potential background/styling
+            ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+            ui.vertical(|ui|{
+                for item in items {
+                    match item {
+                        reporting::ReportItem::PlainText(text) => {
+                            ui.label(text);
+                        }
+                        reporting::ReportItem::FilePath { display, path } => {
+                            // Use a button that looks like a link for click detection
+                             if ui.link(display).clicked() {
+                                // Signal that this path was clicked
+                                clicked_path = Some(path.clone());
+                            }
+                        }
+                    }
+                }
+            });
+        });
+
+        clicked_path // Return the path if a link was clicked
     }
 }

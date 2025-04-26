@@ -4,6 +4,14 @@ use std::path::{Path, PathBuf};
 
 use crate::analysis::{DetectedDefinition, ResolvedConnection}; // DetectedConnection eliminado
 
+// --- NEW: Structured Report Item --- 
+#[derive(Clone, Debug)]
+pub enum ReportItem {
+    PlainText(String),
+    FilePath { display: String, path: PathBuf },
+    // Future: DefinitionLink { display: String, file: PathBuf, line: usize }, etc.
+}
+
 // --- Funciones Movidas desde analysis.rs ---
 
 // Helper interno para generar árbol de estructura (podría permanecer aquí o moverse si se reutiliza)
@@ -62,17 +70,64 @@ fn generate_tree_structure_string(root_path: &Path, files: &[PathBuf]) -> String
     tree
 }
 
+// Helper interno para generar árbol de estructura (AHORA DEVUELVE Vec<ReportItem>)
+fn generate_tree_structure_items(root_path: &Path, files: &[PathBuf]) -> Vec<ReportItem> {
+    let mut items = Vec::new();
+    let mut sorted_files = files.to_vec();
+    sorted_files.sort();
+    let mut printed_dirs = HashSet::new();
+
+    for file_path in sorted_files {
+        if let Ok(relative_path) = file_path.strip_prefix(root_path) {
+            let components: Vec<_> = relative_path.components().collect();
+             // Evitar imprimir la raíz dos veces si solo hay archivos en ella
+            if components.is_empty() || (components.len() == 1 && components[0].as_os_str() == relative_path.as_os_str()) {
+                 if let Some(name) = relative_path.file_name().and_then(|n| n.to_str()) {
+                    items.push(ReportItem::FilePath { display: format!("├── {}", name), path: file_path.clone() });
+                }
+                continue;
+            }
+
+            let mut current_prefix = String::new();
+            for (i, component) in components.iter().enumerate() {
+                let is_last_component = i == components.len() - 1;
+                let component_path = root_path.join(relative_path.iter().take(i + 1).collect::<PathBuf>());
+
+                 if let Some(name) = component.as_os_str().to_str() {
+
+                    if !is_last_component {
+                         if printed_dirs.contains(&component_path) {
+                            current_prefix.push_str("│   ");
+                            continue;
+                        } else {
+                            printed_dirs.insert(component_path.clone());
+                            items.push(ReportItem::FilePath { display: format!("{}├── {}/", current_prefix, name), path: component_path });
+                            current_prefix.push_str("│   ");
+                        }
+                    } else {
+                        items.push(ReportItem::FilePath { display: format!("{}└── {}", current_prefix, name), path: file_path.clone() });
+                    }
+                 } else {
+                    items.push(ReportItem::FilePath { display: format!("{}└── [Nombre no UTF-8]", current_prefix), path: file_path.clone() });
+                    break;
+                 }
+            }
+        }
+    }
+    items
+}
 
 // --- Generadores de Secciones (Públicos) ---
-pub fn generate_structure_section(root_path: &Path, files: &[PathBuf]) -> String {
-    let mut section = String::new();
-    section.push_str("## Project Structure\n\n");
-    section.push_str("```\n");
-    section.push_str(root_path.file_name().unwrap_or_default().to_str().unwrap_or("ROOT"));
-    section.push('\n');
-    section.push_str(&generate_tree_structure_string(root_path, files));
-    section.push_str("```\n");
-    section
+pub fn generate_structure_section(root_path: &Path, files: &[PathBuf]) -> Vec<ReportItem> {
+    let mut section_items = Vec::new();
+    section_items.push(ReportItem::PlainText("## Project Structure\n\n```".to_string()));
+    section_items.push(ReportItem::PlainText(format!("{}", root_path.file_name().unwrap_or_default().to_str().unwrap_or("ROOT"))));
+    
+    // Get the tree structure items
+    section_items.extend(generate_tree_structure_items(root_path, files));
+    
+    section_items.push(ReportItem::PlainText("```\n".to_string()));
+    section_items
 }
 
 
