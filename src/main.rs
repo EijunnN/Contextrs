@@ -49,6 +49,13 @@ struct MyApp {
     file_content_section: Option<String>,
     definitions_section: Option<String>,
     inverse_usage_section: Option<String>,
+
+    // --- State for section visibility ---
+    show_structure: bool,
+    show_connections: bool,
+    show_definitions: bool,
+    show_inverse_usage: bool,
+    show_file_content: bool,
 }
 
 impl Default for MyApp {
@@ -63,6 +70,12 @@ impl Default for MyApp {
             file_content_section: None,
             definitions_section: None,
             inverse_usage_section: None,
+            // Initialize visibility flags
+            show_structure: true,
+            show_connections: true,
+            show_definitions: true,
+            show_inverse_usage: true,
+            show_file_content: true, // Default to visible if generated
         }
     }
 }
@@ -170,6 +183,29 @@ impl eframe::App for MyApp {
             });
         });
 
+        // --- Left Sidebar for Visibility Control ---
+        egui::SidePanel::left("sidebar_panel")
+            .resizable(true)
+            .default_width(150.0)
+            .show(ctx, |ui| {
+                ui.heading("Mostrar Secciones");
+                ui.separator();
+                ui.checkbox(&mut self.show_structure, "Estructura");
+                ui.checkbox(&mut self.show_connections, "Conexiones");
+                ui.checkbox(&mut self.show_definitions, "Definiciones");
+                ui.checkbox(&mut self.show_inverse_usage, "Usos Inversos");
+                // Checkbox to control visibility of content, enabled only if content generation is enabled
+                ui.add_enabled(self.include_file_content, egui::Checkbox::new(&mut self.show_file_content, "Contenido Archivos"));
+                ui.separator();
+
+                // Ensure visibility is off if generation is off
+                if !self.include_file_content {
+                    self.show_file_content = false;
+                }
+
+                // TODO: Add filtering controls here in the future?
+            });
+
         
         if trigger_section_generation {
              if let ScanStatus::Completed(root_path, files, connections, definitions) = &self.scan_status {
@@ -203,25 +239,36 @@ impl eframe::App for MyApp {
                     ui.label(format!("Carpeta analizada: {}", root_path.display()));
                     ui.separator();
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        if let Some(structure) = &self.structure_section {
-                            Self::display_section(ui, "structure_section", structure);
+                        // Conditionally display sections based on visibility flags
+                        if self.show_structure {
+                            if let Some(structure) = &self.structure_section {
+                                Self::display_section(ui, "structure_section", structure);
+                                ui.separator();
+                            }
                         }
-                         if let Some(connections) = &self.connections_section {
-                             ui.separator();
-                            Self::display_section(ui, "connections_section", connections);
+                        if self.show_connections {
+                            if let Some(connections) = &self.connections_section {
+                                Self::display_section(ui, "connections_section", connections);
+                                ui.separator();
+                            }
                         }
-                        if let Some(definitions) = &self.definitions_section {
-                             ui.separator();
-                            Self::display_section(ui, "definitions_section", definitions);
+                        if self.show_definitions {
+                            if let Some(definitions) = &self.definitions_section {
+                                Self::display_section(ui, "definitions_section", definitions);
+                                ui.separator();
+                            }
                         }
-                        if let Some(inverse_usage) = &self.inverse_usage_section {
-                            ui.separator();
-                            Self::display_section(ui, "inverse_usage_section", inverse_usage);
+                        if self.show_inverse_usage {
+                            if let Some(inverse_usage) = &self.inverse_usage_section {
+                                Self::display_section(ui, "inverse_usage_section", inverse_usage);
+                                ui.separator();
+                            }
                         }
-                        if self.include_file_content {
+                        // Show content only if it was generated AND visibility is enabled
+                        if self.include_file_content && self.show_file_content {
                             if let Some(content) = &self.file_content_section {
-                                 ui.separator();
                                 Self::display_section(ui, "content_section", content);
+                                // No separator needed after the last possible section
                             }
                         }
                     });
@@ -268,8 +315,20 @@ impl MyApp {
     }
 
     fn display_section(ui: &mut egui::Ui, id_source: &str, text_content: &str) {
-         let mut display_text = text_content.to_string();
-         ui.add(
+        // Add a heading before each section
+        let heading = match id_source {
+            "structure_section" => "Estructura del Proyecto",
+            "connections_section" => "Conexiones Detectadas",
+            "definitions_section" => "Definiciones y Exportaciones",
+            "inverse_usage_section" => "Usos Inversos",
+            "content_section" => "Contenido de Archivos",
+            _ => "Sección", // Fallback heading
+        };
+        ui.strong(heading);
+        ui.add_space(2.0);
+
+        let mut display_text = text_content.to_string();
+        ui.add(
             egui::TextEdit::multiline(&mut display_text)
                 .id_source(id_source) 
                 .code_editor()
