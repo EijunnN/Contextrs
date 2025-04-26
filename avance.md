@@ -27,5 +27,29 @@
     - Incluida la sección de definiciones en la funcionalidad "Copiar Todo".
     - Actualizadas las funciones `clear_generated_sections` y `rebuild_full_context`.
 
-- **Problema Pendiente:**
-  - Existe un error de compilación persistente en `src/reporting.rs` (función `generate_definitions_section`) que el linter reporta alrededor del cálculo de `line_width` y `max_kind_len` (líneas ~221-225). Se requiere revisión manual para identificar la causa raíz. 
+## 2024-07-28: Control de Visibilidad y Planificación
+
+- **Control de Visibilidad (UI):**
+  - Añadido un panel lateral (sidebar) a la izquierda en la UI (`main.rs`).
+  - Implementados checkboxes en el sidebar para permitir al usuario mostrar u ocultar individualmente las secciones generadas (Estructura, Conexiones, Definiciones, Usos Inversos, Contenido).
+  - Modificada la lógica del panel central para que respete el estado de estos checkboxes al renderizar las secciones.
+  - Añadido estado (`show_structure`, `show_connections`, etc.) a `MyApp` para gestionar la visibilidad.
+
+- **Planificación:**
+  - Discutido el flujo de trabajo ideal para usar la herramienta al investigar código.
+  - Identificadas las funcionalidades clave faltantes para alcanzar ese flujo.
+  - Actualizado `plan.md` para incluir:
+    - Filtros y Búsqueda Interactiva en la UI.
+    - Navegación Cruzada (elementos clickables).
+    - Refinada la descripción del Análisis de Flujo de Llamadas.
+  - Actualizado `avance.md` (este archivo) para reflejar el progreso y los próximos pasos.
+
+## Próximos Pasos / Pendiente para Flujo Ideal
+
+Para alcanzar el flujo de trabajo completo descrito y mejorar significativamente la utilidad en proyectos grandes, las siguientes funcionalidades son prioritarias:
+
+1.  **Filtros y Búsqueda Interactiva en la UI:** Permitir filtrar/buscar directamente en las listas de conexiones, definiciones, etc. desde la interfaz.
+2.  **Análisis de Flujo de Llamadas (Call Hierarchy):** Implementar el análisis con `tree-sitter` para identificar llamadas a funciones *dentro* de los archivos, no solo importaciones.
+3.  **Navegación Cruzada:** Hacer que los elementos (archivos, funciones) en los reportes sean clickables para facilitar la exploración.
+
+(Se eliminó la nota sobre el error de compilación en `reporting.rs` ya que fue resuelto previamente). 

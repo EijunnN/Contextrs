@@ -56,6 +56,13 @@ struct MyApp {
     show_definitions: bool,
     show_inverse_usage: bool,
     show_file_content: bool,
+
+    // --- State for section filtering ---
+    filter_structure: String,
+    filter_connections: String,
+    filter_definitions: String,
+    filter_inverse_usage: String,
+    // Note: Filtering file content directly might be too slow/complex for now
 }
 
 impl Default for MyApp {
@@ -76,6 +83,12 @@ impl Default for MyApp {
             show_definitions: true,
             show_inverse_usage: true,
             show_file_content: true, // Default to visible if generated
+
+            // Initialize filter strings
+            filter_structure: String::new(),
+            filter_connections: String::new(),
+            filter_definitions: String::new(),
+            filter_inverse_usage: String::new(),
         }
     }
 }
@@ -194,9 +207,20 @@ impl eframe::App for MyApp {
                 ui.checkbox(&mut self.show_connections, "Conexiones");
                 ui.checkbox(&mut self.show_definitions, "Definiciones");
                 ui.checkbox(&mut self.show_inverse_usage, "Usos Inversos");
-                // Checkbox to control visibility of content, enabled only if content generation is enabled
                 ui.add_enabled(self.include_file_content, egui::Checkbox::new(&mut self.show_file_content, "Contenido Archivos"));
                 ui.separator();
+
+                // --- Filter Inputs ---
+                ui.heading("Filtrar");
+                ui.label("Estructura:");
+                ui.text_edit_singleline(&mut self.filter_structure);
+                ui.label("Conexiones:");
+                ui.text_edit_singleline(&mut self.filter_connections);
+                ui.label("Definiciones:");
+                ui.text_edit_singleline(&mut self.filter_definitions);
+                 ui.label("Usos Inversos:");
+                ui.text_edit_singleline(&mut self.filter_inverse_usage);
+                // ---------------------
 
                 // Ensure visibility is off if generation is off
                 if !self.include_file_content {
@@ -207,12 +231,79 @@ impl eframe::App for MyApp {
             });
 
         
-        if trigger_section_generation {
+        // --- Section Generation Logic (Applying Filters) ---
+        if trigger_section_generation || 
+           // Regenerate sections if filters change and we have data
+           (matches!(self.scan_status, ScanStatus::Completed(_,_,_,_)) && 
+            (self.filter_structure.len() > 0 || self.filter_connections.len() > 0 || 
+             self.filter_definitions.len() > 0 || self.filter_inverse_usage.len() > 0))
+         {
              if let ScanStatus::Completed(root_path, files, connections, definitions) = &self.scan_status {
-                 self.structure_section = Some(reporting::generate_structure_section(root_path, files));
-                 self.connections_section = Some(reporting::generate_connections_section(root_path, connections));
-                 self.definitions_section = Some(reporting::generate_definitions_section(root_path, definitions));
-                 self.inverse_usage_section = Some(reporting::generate_inverse_usage_section(root_path, connections));
+                // Apply filters BEFORE generating sections
+                
+                // Filter Files for Structure Section
+                let filtered_files: Vec<PathBuf> = files.iter()
+                    .filter(|path| {
+                        if self.filter_structure.is_empty() { return true; }
+                        path.strip_prefix(root_path).unwrap_or(path)
+                           .to_string_lossy().to_lowercase()
+                           .contains(&self.filter_structure.to_lowercase())
+                    })
+                    .cloned()
+                    .collect();
+                self.structure_section = Some(reporting::generate_structure_section(root_path, &filtered_files));
+
+                // Filter Connections for Connections Section
+                let filtered_connections: Vec<ResolvedConnection> = connections.iter()
+                    .filter(|conn| {
+                        if self.filter_connections.is_empty() { return true; }
+                        let filter_lower = self.filter_connections.to_lowercase();
+                        let source_match = conn.source_file.strip_prefix(root_path).unwrap_or(&conn.source_file)
+                                           .to_string_lossy().to_lowercase().contains(&filter_lower);
+                        let import_match = conn.imported_string.to_lowercase().contains(&filter_lower);
+                        let target_match = conn.resolved_target.as_ref().map_or(false, |target| {
+                            target.strip_prefix(root_path).unwrap_or(target)
+                                  .to_string_lossy().to_lowercase().contains(&filter_lower)
+                        });
+                        source_match || import_match || target_match
+                    })
+                    .cloned()
+                    .collect();
+                 self.connections_section = Some(reporting::generate_connections_section(root_path, &filtered_connections));
+
+                 // Filter Definitions for Definitions Section
+                 let filtered_definitions: Vec<DetectedDefinition> = definitions.iter()
+                     .filter(|def| {
+                         if self.filter_definitions.is_empty() { return true; }
+                         let filter_lower = self.filter_definitions.to_lowercase();
+                         let source_match = def.source_file.strip_prefix(root_path).unwrap_or(&def.source_file)
+                                            .to_string_lossy().to_lowercase().contains(&filter_lower);
+                         let symbol_match = def.symbol_name.to_lowercase().contains(&filter_lower);
+                         let kind_match = def.kind.to_lowercase().contains(&filter_lower);
+                         source_match || symbol_match || kind_match
+                     })
+                     .cloned()
+                     .collect();
+                 self.definitions_section = Some(reporting::generate_definitions_section(root_path, &filtered_definitions));
+
+                 // Filter Connections for Inverse Usage Section
+                 let filtered_connections_for_inverse: Vec<ResolvedConnection> = connections.iter()
+                     .filter(|conn| {
+                         if self.filter_inverse_usage.is_empty() { return true; }
+                         let filter_lower = self.filter_inverse_usage.to_lowercase();
+                         let source_match = conn.source_file.strip_prefix(root_path).unwrap_or(&conn.source_file)
+                                            .to_string_lossy().to_lowercase().contains(&filter_lower);
+                         let target_match = conn.resolved_target.as_ref().map_or(false, |target| {
+                            target.strip_prefix(root_path).unwrap_or(target)
+                                  .to_string_lossy().to_lowercase().contains(&filter_lower)
+                        });
+                         source_match || target_match
+                     })
+                     .cloned()
+                     .collect();
+                 self.inverse_usage_section = Some(reporting::generate_inverse_usage_section(root_path, &filtered_connections_for_inverse));
+                 
+                 // File content generation remains unchanged (not filtered currently)
                  if self.include_file_content {
                      self.file_content_section = Some(reporting::generate_file_content_section(root_path, files));
                  } else {
