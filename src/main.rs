@@ -49,8 +49,8 @@ struct MyApp {
     structure_section: Option<Vec<reporting::ReportItem>>,
     connections_section: Option<Vec<reporting::ReportItem>>,
     file_content_section: Option<String>, // Keep as String for now
-    definitions_section: Option<String>, // TODO: Update to Vec<ReportItem>
-    inverse_usage_section: Option<String>, // TODO: Update to Vec<ReportItem>
+    definitions_section: Option<Vec<reporting::ReportItem>>, // Updated to Vec<ReportItem>
+    inverse_usage_section: Option<Vec<reporting::ReportItem>>, // Updated to Vec<ReportItem>
 
     // --- UI State ---
     show_structure: bool,
@@ -189,13 +189,17 @@ impl eframe::App for MyApp {
                     }
                 }
                 if ui.add_enabled(copy_enabled, egui::Button::new("Copiar Definiciones")).clicked() {
-                    if let Some(text) = &self.definitions_section {
-                        copy_to_clipboard(text, &mut self.copy_notification);
+                    if let Some(items) = &self.definitions_section {
+                        // Convert ReportItems to String before copying
+                        let text_to_copy = Self::report_items_to_string(items);
+                        copy_to_clipboard(&text_to_copy, &mut self.copy_notification);
                     }
                 }
                 if ui.add_enabled(copy_enabled, egui::Button::new("Copiar Usos")).clicked() {
-                    if let Some(text) = &self.inverse_usage_section {
-                        copy_to_clipboard(text, &mut self.copy_notification);
+                    if let Some(items) = &self.inverse_usage_section {
+                        // Convert ReportItems to String before copying
+                        let text_to_copy = Self::report_items_to_string(items);
+                        copy_to_clipboard(&text_to_copy, &mut self.copy_notification);
                     }
                 }
                 if ui.add_enabled(copy_enabled, egui::Button::new("Copiar Todo")).clicked() {
@@ -372,23 +376,19 @@ impl eframe::App for MyApp {
                         }
                         if app_state.show_definitions {
                             if let Some(definitions) = &app_state.definitions_section {
-                                // TODO: Update display_section call when definitions uses ReportItem
-                                // Self::display_section(ui, "definitions_section", definitions, &mut app_state); // Temporarily commented out
-                                ui.strong("Definiciones y Exportaciones"); // Temporary heading
-                                ui.add_space(2.0);
-                                let mut text = definitions.clone();
-                                ui.add(egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY));
+                                // Actualizado: ahora usa ReportItem
+                                if let Some(path) = Self::display_section(ui, "definitions_section", definitions) {
+                                    clicked_path_in_scroll = Some(path);
+                                }
                                 ui.separator();
                             }
                         }
                         if app_state.show_inverse_usage {
                             if let Some(inverse_usage) = &app_state.inverse_usage_section {
-                                // TODO: Update display_section call when inverse_usage uses ReportItem
-                                // Self::display_section(ui, "inverse_usage_section", inverse_usage, &mut app_state); // Temporarily commented out
-                                ui.strong("Usos Inversos"); // Temporary heading
-                                ui.add_space(2.0);
-                                let mut text = inverse_usage.clone();
-                                ui.add(egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY));
+                                // Actualizado: ahora usa ReportItem
+                                if let Some(path) = Self::display_section(ui, "inverse_usage_section", inverse_usage) {
+                                    clicked_path_in_scroll = Some(path);
+                                }
                                 ui.separator();
                             }
                         }
@@ -520,12 +520,14 @@ impl MyApp {
             full_context.push_str(&connections_text);
              full_context.push_str("\n\n");
         }
-        if let Some(d) = &self.definitions_section {
-            full_context.push_str(d);
+        if let Some(items) = &self.definitions_section {
+            let definitions_text = Self::report_items_to_string(items);
+            full_context.push_str(&definitions_text);
             full_context.push_str("\n\n");
         }
-        if let Some(iu) = &self.inverse_usage_section {
-            full_context.push_str(iu);
+        if let Some(items) = &self.inverse_usage_section {
+            let inverse_usage_text = Self::report_items_to_string(items);
+            full_context.push_str(&inverse_usage_text);
             full_context.push_str("\n\n");
         }
         if self.include_file_content {

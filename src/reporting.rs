@@ -316,13 +316,13 @@ pub fn generate_connections_section(root_path: &Path, connections: &[ResolvedCon
 }
 
 // --- Nueva Función para Generar Sección de Definiciones ---
-pub fn generate_definitions_section(root_path: &Path, definitions: &[DetectedDefinition]) -> String {
-    let mut section = String::new();
-    section.push_str("## Detected Definitions & Exports\n\n");
+pub fn generate_definitions_section(root_path: &Path, definitions: &[DetectedDefinition]) -> Vec<ReportItem> {
+    let mut section_items = Vec::new();
+    section_items.push(ReportItem::PlainText("## Detected Definitions & Exports\n\n".to_string()));
 
     if definitions.is_empty() {
-        section.push_str("_No definitions or exports detected._\n");
-        return section;
+        section_items.push(ReportItem::PlainText("_No definitions or exports detected._\n".to_string()));
+        return section_items;
     }
 
     // 1. Agrupar definiciones por archivo fuente
@@ -335,7 +335,7 @@ pub fn generate_definitions_section(root_path: &Path, definitions: &[DetectedDef
     let mut sorted_files: Vec<PathBuf> = grouped_definitions.keys().cloned().collect();
     sorted_files.sort();
 
-    // 3. Construir la cadena de la sección
+    // 3. Construir los items de la sección
     for file_path in sorted_files {
         if let Some(defs_in_file) = grouped_definitions.get_mut(&file_path) {
             // Ordenar definiciones dentro del archivo por número de línea
@@ -346,8 +346,8 @@ pub fn generate_definitions_section(root_path: &Path, definitions: &[DetectedDef
                 .unwrap_or(&file_path)
                 .display();
 
-            section.push_str(&format!("### `{}`\n", display_path));
-            section.push_str("```\n");
+            section_items.push(ReportItem::PlainText(format!("### `{}`\n", display_path)));
+            section_items.push(ReportItem::PlainText("```\n".to_string()));
 
             // Calcular padding para el número de línea
             let max_line_num = defs_in_file.last().map_or(0, |d| d.line_number);
@@ -357,27 +357,35 @@ pub fn generate_definitions_section(root_path: &Path, definitions: &[DetectedDef
             let max_kind_len = defs_in_file.iter().map(|d| d.kind.len()).max().unwrap_or(0);
 
             for def in defs_in_file {
-                // Restaurar formato original
-                section.push_str(&format!(
+                // Añadir la definición como texto
+                section_items.push(ReportItem::PlainText(format!(
                     "L{:<line_width$} {:<kind_width$} {}\n", 
                     def.line_number, 
                     def.kind, 
                     def.symbol_name, 
                     line_width = line_width, 
                     kind_width = max_kind_len
-                ));
+                )));
+                
+                // Opcionalmente podríamos hacer que cada símbolo sea clickable usando:
+                // section_items.push(ReportItem::FilePath { 
+                //    display: format!("L{:<line_width$} {:<kind_width$} {}", 
+                //    def.line_number, def.kind, def.symbol_name, 
+                //    line_width = line_width, kind_width = max_kind_len),
+                //    path: def.source_file.clone() 
+                // });
             }
-            section.push_str("```\n\n");
+            section_items.push(ReportItem::PlainText("```\n\n".to_string()));
         }
     }
 
-    section
+    section_items
 }
 
 // --- NUEVA FUNCIÓN: Generar Sección de Usos Inversos ---
-pub fn generate_inverse_usage_section(root_path: &Path, connections: &[ResolvedConnection]) -> String {
-    let mut section = String::new();
-    section.push_str("## Inverse Usage (Who Imports What)\n\n");
+pub fn generate_inverse_usage_section(root_path: &Path, connections: &[ResolvedConnection]) -> Vec<ReportItem> {
+    let mut section_items = Vec::new();
+    section_items.push(ReportItem::PlainText("## Inverse Usage (Who Imports What)\n\n".to_string()));
 
     // 1. Construir mapa inverso: Target -> Vec<Source>
     let mut inverse_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
@@ -394,16 +402,16 @@ pub fn generate_inverse_usage_section(root_path: &Path, connections: &[ResolvedC
     }
 
     if inverse_map.is_empty() {
-        section.push_str("_No resolved local imports found to build inverse usage._\n");
-        return section;
+        section_items.push(ReportItem::PlainText("_No resolved local imports found to build inverse usage._\n".to_string()));
+        return section_items;
     }
 
     // 2. Obtener lista ordenada de archivos que fueron importados
     let mut sorted_target_files: Vec<PathBuf> = inverse_map.keys().cloned().collect();
     sorted_target_files.sort();
 
-    // 3. Construir la cadena de reporte
-    section.push_str("```\n");
+    // 3. Construir los items de reporte
+    section_items.push(ReportItem::PlainText("```\n".to_string()));
     let num_targets = sorted_target_files.len();
     for (i, target_file) in sorted_target_files.iter().enumerate() {
         let is_last_target = i == num_targets - 1;
@@ -414,7 +422,11 @@ pub fn generate_inverse_usage_section(root_path: &Path, connections: &[ResolvedC
             .unwrap_or(target_file)
             .display();
 
-        section.push_str(&format!("{}{}\n", target_prefix, display_target_path));
+        // Agregar como FilePath para que sea clickable
+        section_items.push(ReportItem::FilePath { 
+            display: format!("{}{}", target_prefix, display_target_path),
+            path: target_file.clone() 
+        });
 
         if let Some(source_files) = inverse_map.get_mut(target_file) {
             source_files.sort(); // Ordenar los archivos que lo importan
@@ -430,18 +442,17 @@ pub fn generate_inverse_usage_section(root_path: &Path, connections: &[ResolvedC
                     .unwrap_or(source_file)
                     .display();
 
-                section.push_str(&format!(
-                    "{}{}{}\n", 
-                    base_indent, 
-                    source_prefix, 
-                    display_source_path
-                ));
+                // Agregar como FilePath para que sea clickable
+                section_items.push(ReportItem::FilePath { 
+                    display: format!("{}{}{}", base_indent, source_prefix, display_source_path),
+                    path: source_file.clone() 
+                });
             }
         }
     }
-    section.push_str("```\n");
+    section_items.push(ReportItem::PlainText("```\n".to_string()));
 
-    section
+    section_items
 }
 
 pub fn generate_file_content_section(root_path: &Path, files: &[PathBuf]) -> String {
