@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::cmp::Ordering;
 
 use crate::analysis::{DetectedDefinition, ResolvedConnection}; // DetectedConnection eliminado
 
@@ -12,13 +13,112 @@ pub enum ReportItem {
     // Future: DefinitionLink { display: String, file: PathBuf, line: usize }, etc.
 }
 
+// --- Funciones auxiliares para ordenación natural ---
+
+fn natural_lexical_cmp_revised(s1: &str, s2: &str) -> Ordering {
+    let mut chars1 = s1.chars().peekable();
+    let mut chars2 = s2.chars().peekable();
+
+    loop {
+        match (chars1.peek().is_some(), chars2.peek().is_some()) {
+            (true, true) => {
+                let c1 = *chars1.peek().unwrap();
+                let c2 = *chars2.peek().unwrap();
+
+                if c1.is_ascii_digit() && c2.is_ascii_digit() {
+                    let mut num_str1 = String::new();
+                    while let Some(&ch) = chars1.peek() {
+                        if ch.is_ascii_digit() {
+                            num_str1.push(chars1.next().unwrap());
+                        } else {
+                            break;
+                        }
+                    }
+                    let mut num_str2 = String::new();
+                    while let Some(&ch) = chars2.peek() {
+                        if ch.is_ascii_digit() {
+                            num_str2.push(chars2.next().unwrap());
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Si una cadena numérica está vacía (no debería pasar con is_ascii_digit),
+                    // tratar como 0 o manejar según la lógica específica (aquí se parsea a u64).
+                    let num1 = num_str1.parse::<u64>().unwrap_or_default();
+                    let num2 = num_str2.parse::<u64>().unwrap_or_default();
+                    
+                    match num1.cmp(&num2) {
+                        Ordering::Equal => {
+                            // Si los números son iguales, la longitud de las cadenas numéricas originales
+                            // puede desempatar (ej: "01" vs "1"). Aquí consideramos longitudes.
+                            // O simplemente continuar si se prefiere que "01" y "1" sean totalmente equivalentes
+                            // y solo se compare el resto de la cadena.
+                            // Por simplicidad, si los valores numéricos son iguales, continuamos.
+                            // Si se necesita una regla como que "1" venga antes que "01", se requeriría
+                            // comparar num_str1.len() vs num_str2.len() o similar aquí.
+                            // Para la ordenación natural estándar, comparar los valores numéricos es lo principal.
+                            if num_str1.len() != num_str2.len() && num1 == num2 { // e.g. "01" vs "1"
+                                // Podríamos definir que el más corto viene primero si los valores son iguales.
+                                // return num_str1.len().cmp(&num_str2.len());
+                                // Pero para este caso, continuar es más simple y a menudo aceptable.
+                            }
+                            // Continuar comparando el resto de la cadena
+                        }
+                        other => return other,
+                    }
+                } else {
+                    // Comparación no numérica o mixta
+                    let char1_val = chars1.next().unwrap();
+                    let char2_val = chars2.next().unwrap();
+                    match char1_val.cmp(&char2_val) {
+                        Ordering::Equal => continue,
+                        other => return other,
+                    }
+                }
+            }
+            (true, false) => return Ordering::Greater, // s1 es más largo
+            (false, true) => return Ordering::Less,    // s2 es más largo
+            (false, false) => return Ordering::Equal,  // ambos terminaron
+        }
+    }
+}
+
+fn compare_paths_naturally(a: &Path, b: &Path) -> Ordering {
+    let mut components_a = a.components().peekable();
+    let mut components_b = b.components().peekable();
+
+    loop {
+        match (components_a.peek(), components_b.peek()) {
+            (Some(comp_a_os), Some(comp_b_os)) => {
+                // Convertir OsStr a String para la comparación. Pérdida si no es UTF-8,
+                // pero es un compromiso común para la ordenación natural simple.
+                let comp_a_str = comp_a_os.as_os_str().to_string_lossy();
+                let comp_b_str = comp_b_os.as_os_str().to_string_lossy();
+                
+                match natural_lexical_cmp_revised(&comp_a_str, &comp_b_str) {
+                    Ordering::Equal => {
+                        // Consumir componentes y continuar
+                        components_a.next();
+                        components_b.next();
+                    }
+                    other => return other,
+                }
+            }
+            (Some(_), None) => return Ordering::Greater, // a es más largo (más profundo)
+            (None, Some(_)) => return Ordering::Less,    // b es más largo (más profundo)
+            (None, None) => return Ordering::Equal,      // Ambas rutas son equivalentes
+        }
+    }
+}
+
 // --- Funciones Movidas desde analysis.rs ---
 
 // Helper interno para generar árbol de estructura (podría permanecer aquí o moverse si se reutiliza)
 fn generate_tree_structure_string(root_path: &Path, files: &[PathBuf]) -> String {
     let mut tree = String::new();
     let mut sorted_files = files.to_vec();
-    sorted_files.sort();
+    sorted_files.sort_by(|a, b| compare_paths_naturally(a.as_path(), b.as_path()));
     let mut printed_dirs = HashSet::new();
 
     for file_path in sorted_files {
@@ -74,7 +174,7 @@ fn generate_tree_structure_string(root_path: &Path, files: &[PathBuf]) -> String
 fn generate_tree_structure_items(root_path: &Path, files: &[PathBuf]) -> Vec<ReportItem> {
     let mut items = Vec::new();
     let mut sorted_files = files.to_vec();
-    sorted_files.sort();
+    sorted_files.sort_by(|a, b| compare_paths_naturally(a.as_path(), b.as_path()));
     let mut printed_dirs = HashSet::new();
 
     for file_path in sorted_files {
